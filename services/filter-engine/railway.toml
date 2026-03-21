@@ -1,0 +1,15 @@
+[build]
+# Build from repo root so Dockerfile can access packages/shared
+dockerfilePath = "services/filter-engine/Dockerfile"
+
+[deploy]
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
+
+# Required env vars (set in Railway dashboard → Variables):
+#   TAP_URL                  e.g. http://tap.railway.internal:2480
+#   TAP_ADMIN_PASSWORD       same value as the Tap container
+#   CONFIG_ENDPOINT_URL      https://<worker>.workers.dev/internal/configs
+#   CONFIG_ENDPOINT_SECRET   random secret shared with CF Worker
+#   WRITE_ENDPOINT_URL       https://<worker>.workers.dev/internal/posts
+#   WRITE_ENDPOINT_SECRET    same as CONFIG_ENDPOINT_SECRET (or separate)

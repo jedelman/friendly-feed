@@ -4,12 +4,18 @@
  * Implements app.bsky.feed.getFeedSkeleton for the AT Protocol feed generator lexicon.
  * Bluesky's AppView calls this endpoint when a user opens one of their custom feeds.
  *
+ * Also serves internal endpoints used by the Railway filter engine:
+ *   GET  /internal/configs  — returns active feed configs as JSON
+ *   POST /internal/posts    — accepts batched post inserts from the filter engine
+ *
  * Spec: https://docs.bsky.app/docs/api/app-bsky-feed-get-feed-skeleton
  */
 
 export interface Env {
   DB: D1Database
   SERVICE_DID: string
+  /** Shared secret for /internal/* endpoints — set in wrangler.toml [vars] or CF secrets */
+  INTERNAL_SECRET: string
 }
 
 const HEADERS = {
@@ -34,9 +40,19 @@ export default {
       }, { headers: HEADERS })
     }
 
-    // Feed skeleton endpoint
+    // Feed skeleton endpoint — called by Bluesky AppView
     if (url.pathname === '/xrpc/app.bsky.feed.getFeedSkeleton') {
       return handleGetFeedSkeleton(req, env, url)
+    }
+
+    // Internal: serve active feed configs to the filter engine
+    if (url.pathname === '/internal/configs' && req.method === 'GET') {
+      return handleGetConfigs(req, env)
+    }
+
+    // Internal: accept batched post inserts from the filter engine
+    if (url.pathname === '/internal/posts' && req.method === 'POST') {
+      return handlePostInsert(req, env)
     }
 
     return new Response('Not found', { status: 404 })
@@ -47,6 +63,110 @@ export default {
     await runWeeklyRefinement(env)
   },
 }
+
+// ---------------------------------------------------------------------------
+// Internal auth
+// ---------------------------------------------------------------------------
+
+function checkInternalAuth(req: Request, env: Env): boolean {
+  const auth = req.headers.get('Authorization') ?? ''
+  const [scheme, token] = auth.split(' ')
+  return scheme === 'Bearer' && token === env.INTERNAL_SECRET
+}
+
+// ---------------------------------------------------------------------------
+// Internal: GET /internal/configs
+// Returns all active feed configs for the filter engine to load/poll.
+// ---------------------------------------------------------------------------
+
+async function handleGetConfigs(req: Request, env: Env): Promise<Response> {
+  if (!checkInternalAuth(req, env)) {
+    return Response.json({ error: 'unauthorized' }, { status: 401, headers: HEADERS })
+  }
+
+  const rows = await env.DB
+    .prepare(`
+      SELECT feed_id, owner_did, name, description, intent_text,
+             terms, exclude_terms, seed_accounts,
+             active, created_at, updated_at, tier_at_creation
+      FROM feed_configs
+      WHERE active = 1
+    `)
+    .all<{
+      feed_id: string; owner_did: string; name: string; description: string
+      intent_text: string; terms: string; exclude_terms: string; seed_accounts: string
+      active: number; created_at: number; updated_at: number; tier_at_creation: string
+    }>()
+
+  const configs = rows.results.map(r => ({
+    feedId: r.feed_id,
+    ownerDid: r.owner_did,
+    name: r.name,
+    description: r.description,
+    intentText: r.intent_text,
+    terms: JSON.parse(r.terms) as string[],
+    excludeTerms: JSON.parse(r.exclude_terms) as string[],
+    seedAccounts: JSON.parse(r.seed_accounts) as string[],
+    active: Boolean(r.active),
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    tierAtCreation: r.tier_at_creation,
+  }))
+
+  return Response.json({ configs }, { headers: HEADERS })
+}
+
+// ---------------------------------------------------------------------------
+// Internal: POST /internal/posts
+// Accepts batched post inserts from the filter engine.
+// Body: { posts: PostMatch[] }
+// ---------------------------------------------------------------------------
+
+interface PostMatch {
+  feedId: string
+  postUri: string
+  postCid: string
+  authorDid: string
+  indexedAt: number
+  expiresAt: number
+}
+
+async function handlePostInsert(req: Request, env: Env): Promise<Response> {
+  if (!checkInternalAuth(req, env)) {
+    return Response.json({ error: 'unauthorized' }, { status: 401, headers: HEADERS })
+  }
+
+  let body: { posts: PostMatch[] }
+  try {
+    body = await req.json() as { posts: PostMatch[] }
+  } catch {
+    return Response.json({ error: 'invalid JSON body' }, { status: 400, headers: HEADERS })
+  }
+
+  const posts = body?.posts
+  if (!Array.isArray(posts) || posts.length === 0) {
+    return Response.json({ inserted: 0 }, { headers: HEADERS })
+  }
+
+  // Batch insert using D1's batch API
+  // INSERT OR IGNORE skips duplicates (same feed_id + post_uri)
+  const stmts = posts.map(p =>
+    env.DB
+      .prepare(`
+        INSERT OR IGNORE INTO feed_posts (feed_id, post_uri, post_cid, author_did, indexed_at, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      .bind(p.feedId, p.postUri, p.postCid, p.authorDid, p.indexedAt, p.expiresAt)
+  )
+
+  await env.DB.batch(stmts)
+
+  return Response.json({ inserted: posts.length }, { headers: HEADERS })
+}
+
+// ---------------------------------------------------------------------------
+// Public: GET /xrpc/app.bsky.feed.getFeedSkeleton
+// ---------------------------------------------------------------------------
 
 async function handleGetFeedSkeleton(
   _req: Request,
