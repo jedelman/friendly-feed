@@ -1,0 +1,32 @@
+# Tap — AT Protocol firehose consumer
+# Deploy to Railway as a Docker service
+# Docs: https://github.com/bluesky-social/indigo/blob/main/cmd/tap/README.md
+
+services:
+  tap:
+    image: ghcr.io/bluesky-social/indigo/tap:latest
+    ports:
+      - "2480:2480"
+    environment:
+      # Required
+      TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
+
+      # Firehose source
+      TAP_RELAY_HOST: wss://bsky.network
+
+      # Do NOT set TAP_FULL_NETWORK=true — we filter by collection only
+      # Filter engine subscribes and applies per-feed rules
+
+      # Delivery mode: WebSocket with acks (default, recommended)
+      # TAP_DISABLE_ACKS: false
+
+      # Tune for Railway container restarts
+      TAP_RETRY_TIMEOUT: 60s
+      TAP_LOG_LEVEL: info
+
+    restart: unless-stopped
+    volumes:
+      - tap-data:/data
+
+volumes:
+  tap-data:

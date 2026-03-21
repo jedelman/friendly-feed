@@ -1,0 +1,15 @@
+name = "friendly-feed-skeleton"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "friendly-feed"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[vars]
+SERVICE_DID = "did:web:feeds.friendlyfeed.app"
+
+# Cron for weekly agent refinement suggestions (Pro/Studio)
+[triggers]
+crons = ["0 9 * * 1"]  # Monday 9am UTC
