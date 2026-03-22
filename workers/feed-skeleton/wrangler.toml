@@ -5,7 +5,7 @@ compatibility_date = "2025-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "friendly-feed"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "12f77c98-595b-4919-9555-a334e0948ad5"
 
 [vars]
 SERVICE_DID = "did:web:feeds.friendlyfeed.app"
