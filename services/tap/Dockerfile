@@ -15,5 +15,4 @@ ENV TAP_RELAY_HOST=wss://bsky.network \
 
 EXPOSE 2480
 
-# Data volume for Tap's internal state (sequence cursor, buffered events)
-VOLUME ["/data"]
+# Note: do not use VOLUME — Railway manages persistent storage via their Volumes UI
