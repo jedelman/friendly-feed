@@ -1,0 +1,15 @@
+[build]
+# Tap is a pre-built Docker image — use Dockerfile to pull it
+dockerfilePath = "services/tap/Dockerfile"
+
+[deploy]
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
+
+# Required env vars (set in Railway dashboard → Variables):
+#   TAP_ADMIN_PASSWORD    strong random password
+#
+# Optional / already defaulted in Dockerfile:
+#   TAP_RELAY_HOST        wss://bsky.network
+#   TAP_LOG_LEVEL         info
+#   TAP_RETRY_TIMEOUT     60s

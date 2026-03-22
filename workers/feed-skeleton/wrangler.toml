@@ -1,14 +1,22 @@
 name = "friendly-feed-skeleton"
 main = "src/index.ts"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-01-01"
+
+[[routes]]
+pattern = "friendly-feed.jason-edelman.org/*"
+zone_name = "jason-edelman.org"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "friendly-feed"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "12f77c98-595b-4919-9555-a334e0948ad5"
 
 [vars]
 SERVICE_DID = "did:web:feeds.friendlyfeed.app"
+# INTERNAL_SECRET must be set as a CF secret (not a plain var) to keep it out of source:
+#   wrangler secret put INTERNAL_SECRET
+# Use the same value in Railway for the filter engine's CONFIG_ENDPOINT_SECRET
+# and WRITE_ENDPOINT_SECRET env vars.
 
 # Cron for weekly agent refinement suggestions (Pro/Studio)
 [triggers]
