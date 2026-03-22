@@ -2,6 +2,10 @@ name = "friendly-feed-skeleton"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 
+[[routes]]
+pattern = "friendly-feed.jason-edelman.org/*"
+zone_name = "jason-edelman.org"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "friendly-feed"
