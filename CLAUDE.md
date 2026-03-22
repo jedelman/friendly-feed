@@ -11,11 +11,20 @@
 
 ## Branches
 
-- **Deployment branch:** `claude/setup-deployment-access-fKgXF` — contains D1 ID + custom domain in `wrangler.toml`
-- **Dev branch:** `master` (does not yet include deployment commits)
+- **Deployment branch:** `claude/setup-deployment-access-fKgXF` — merged into master ✅
+- **Dev branch:** `master` — up to date, includes D1 ID + custom domain in `wrangler.toml`
 
-## Next Steps
+## Status (as of 2026-03-22)
 
-- Set `INTERNAL_SECRET` CF secret and mirror to Railway env vars
+- Worker deployed and live at `https://friendly-feed.jason-edelman.org/*`
+- D1 schema migrated (all 6 tables)
+- Tap + filter-engine Railway deploy: **not yet done**
+- `INTERNAL_SECRET`: **not yet set**
+
+## Next Session: Testing
+
+- Smoke-test the live Worker endpoints (health, feed skeleton routes)
+- Set `INTERNAL_SECRET` via `wrangler secret put INTERNAL_SECRET` + mirror to Railway
 - Deploy Tap + filter-engine to Railway
 - Wire Railway → Worker URL env vars
+
