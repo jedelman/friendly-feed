@@ -65,7 +65,6 @@ export interface AdminStats {
 }
 
 export interface ReviewQueueItem {
-  id: number
   feedId: string
   feedName: string
   ownerHandle: string

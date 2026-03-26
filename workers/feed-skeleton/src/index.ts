@@ -1,270 +1,199 @@
 /**
- * Friendly Feed — getFeedSkeleton Worker
+ * Friendly Feed — CF Worker
  *
- * Implements app.bsky.feed.getFeedSkeleton for the AT Protocol feed generator lexicon.
- * Bluesky's AppView calls this endpoint when a user opens one of their custom feeds.
+ * Routes:
+ *   Public (Bluesky AppView)
+ *     GET  /.well-known/did.json
+ *     GET  /xrpc/app.bsky.feed.getFeedSkeleton
  *
- * Also serves internal endpoints used by the Railway filter engine:
- *   GET  /internal/configs  — returns active feed configs as JSON
- *   POST /internal/posts    — accepts batched post inserts from the filter engine
+ *   Builder API (called by the Svelte SPA)
+ *     GET    /api/user?handle=<handle>
+ *     GET    /api/feeds?ownerDid=<did>
+ *     POST   /api/feeds
+ *     PATCH  /api/feeds/:id
+ *     DELETE /api/feeds/:id
+ *     POST   /api/generate
+ *     GET    /api/preview
+ *     POST   /api/hitl
  *
- * Spec: https://docs.bsky.app/docs/api/app-bsky-feed-get-feed-skeleton
+ *   Admin API (Bearer ADMIN_SECRET)
+ *     GET  /api/admin/stats
+ *     GET  /api/admin/queue
+ *     POST /api/admin/queue/:feedId/approve
+ *     POST /api/admin/queue/:feedId/reject
+ *
+ *   Internal (Bearer INTERNAL_SECRET — filter engine / Palomar)
+ *     GET  /internal/configs
+ *     POST /internal/posts
+ *
+ *   Cron
+ *     Monday 9am UTC — weekly feed refinement suggestions
  */
 
-export interface Env {
-  DB: D1Database
-  SERVICE_DID: string
-  /** Shared secret for /internal/* endpoints — set in wrangler.toml [vars] or CF secrets */
-  INTERNAL_SECRET: string
-}
+import { type Env, CORS, json } from './types'
+import { handleGetUser }         from './handlers/user'
+import {
+  handleListFeeds, handleCreateFeed,
+  handleUpdateFeed, handleDeleteFeed,
+} from './handlers/feeds'
+import { handleGenerate }        from './handlers/generate'
+import { handlePreview }         from './handlers/preview'
+import { handleHitl }            from './handlers/hitl'
+import {
+  handleAdminStats, handleAdminQueue,
+  handleAdminApprove, handleAdminReject,
+} from './handlers/admin'
+import { handleGetConfigs, handlePostInsert } from './handlers/internal'
+import { handleGetFeedSkeleton }              from './handlers/skeleton'
 
-const HEADERS = {
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': '*',
-}
+export { type Env }
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
-    const url = new URL(req.url)
+    // CORS preflight
+    if (req.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: CORS })
+    }
 
-    // DID document — required for feed generator registration
-    if (url.pathname === '/.well-known/did.json') {
-      return Response.json({
+    const url    = new URL(req.url)
+    const path   = url.pathname
+    const method = req.method
+
+    // ── Well-known DID document ──────────────────────────────────────────
+    if (path === '/.well-known/did.json') {
+      return json({
         '@context': ['https://www.w3.org/ns/did/v1'],
         id: env.SERVICE_DID,
         service: [{
-          id: '#bsky_fg',
-          type: 'BskyFeedGenerator',
+          id:              '#bsky_fg',
+          type:            'BskyFeedGenerator',
           serviceEndpoint: `https://${url.hostname}`,
         }],
-      }, { headers: HEADERS })
+      })
     }
 
-    // Feed skeleton endpoint — called by Bluesky AppView
-    if (url.pathname === '/xrpc/app.bsky.feed.getFeedSkeleton') {
+    // ── Bluesky AppView ──────────────────────────────────────────────────
+    if (path === '/xrpc/app.bsky.feed.getFeedSkeleton' && method === 'GET') {
       return handleGetFeedSkeleton(req, env, url)
     }
 
-    // Internal: serve active feed configs to the filter engine
-    if (url.pathname === '/internal/configs' && req.method === 'GET') {
-      return handleGetConfigs(req, env)
+    // ── Builder API ──────────────────────────────────────────────────────
+    if (path === '/api/user'     && method === 'GET')  return handleGetUser(req, env)
+    if (path === '/api/feeds'    && method === 'GET')  return handleListFeeds(req, env)
+    if (path === '/api/feeds'    && method === 'POST') return handleCreateFeed(req, env)
+    if (path === '/api/generate' && method === 'POST') return handleGenerate(req, env)
+    if (path === '/api/preview'  && method === 'GET')  return handlePreview(req, env)
+    if (path === '/api/hitl'     && method === 'POST') return handleHitl(req, env)
+
+    // /api/feeds/:id
+    const feedsMatch = path.match(/^\/api\/feeds\/([^/]+)$/)
+    if (feedsMatch) {
+      const feedId = feedsMatch[1]
+      if (method === 'PATCH')  return handleUpdateFeed(req, env, feedId)
+      if (method === 'DELETE') return handleDeleteFeed(req, env, feedId)
     }
 
-    // Internal: accept batched post inserts from the filter engine
-    if (url.pathname === '/internal/posts' && req.method === 'POST') {
-      return handlePostInsert(req, env)
-    }
+    // ── Admin API ────────────────────────────────────────────────────────
+    if (path === '/api/admin/stats' && method === 'GET')  return handleAdminStats(req, env)
+    if (path === '/api/admin/queue' && method === 'GET')  return handleAdminQueue(req, env)
+
+    const approveMatch = path.match(/^\/api\/admin\/queue\/([^/]+)\/approve$/)
+    if (approveMatch && method === 'POST') return handleAdminApprove(req, env, approveMatch[1])
+
+    const rejectMatch = path.match(/^\/api\/admin\/queue\/([^/]+)\/reject$/)
+    if (rejectMatch && method === 'POST')  return handleAdminReject(req, env, rejectMatch[1])
+
+    // ── Internal (filter engine) ─────────────────────────────────────────
+    if (path === '/internal/configs' && method === 'GET')  return handleGetConfigs(req, env)
+    if (path === '/internal/posts'   && method === 'POST') return handlePostInsert(req, env)
 
     return new Response('Not found', { status: 404 })
   },
 
-  // Weekly cron: generate agent refinement suggestions for Pro/Studio feeds
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
     await runWeeklyRefinement(env)
   },
 }
 
 // ---------------------------------------------------------------------------
-// Internal auth
+// Weekly cron — Pro/Studio feed refinement suggestions
 // ---------------------------------------------------------------------------
 
-function checkInternalAuth(req: Request, env: Env): boolean {
-  const auth = req.headers.get('Authorization') ?? ''
-  const [scheme, token] = auth.split(' ')
-  return scheme === 'Bearer' && token === env.INTERNAL_SECRET
-}
+async function runWeeklyRefinement(env: Env): Promise<void> {
+  if (!env.ANTHROPIC_API_KEY) return
 
-// ---------------------------------------------------------------------------
-// Internal: GET /internal/configs
-// Returns all active feed configs for the filter engine to load/poll.
-// ---------------------------------------------------------------------------
-
-async function handleGetConfigs(req: Request, env: Env): Promise<Response> {
-  if (!checkInternalAuth(req, env)) {
-    return Response.json({ error: 'unauthorized' }, { status: 401, headers: HEADERS })
-  }
-
-  const rows = await env.DB
+  // Find Pro/Studio feeds with HITL activity in the last 7 days
+  const weekAgo = Date.now() - 7 * 86_400_000
+  const feeds = await env.DB
     .prepare(`
-      SELECT feed_id, owner_did, name, description, intent_text,
-             terms, exclude_terms, seed_accounts,
-             active, created_at, updated_at, tier_at_creation
-      FROM feed_configs
-      WHERE active = 1
+      SELECT DISTINCT fc.feed_id, fc.name, fc.intent_text, fc.terms,
+                      fc.exclude_terms, fc.seed_accounts, u.tier
+      FROM feed_configs fc
+      JOIN users u ON u.did = fc.owner_did
+      JOIN hitl_events he ON he.feed_id = fc.feed_id
+      WHERE u.tier IN ('pro', 'studio')
+        AND fc.active = 1
+        AND he.created_at >= ?
+      LIMIT 50
     `)
+    .bind(weekAgo)
     .all<{
-      feed_id: string; owner_did: string; name: string; description: string
-      intent_text: string; terms: string; exclude_terms: string; seed_accounts: string
-      active: number; created_at: number; updated_at: number; tier_at_creation: string
+      feed_id: string; name: string; intent_text: string
+      terms: string; exclude_terms: string; seed_accounts: string; tier: string
     }>()
 
-  const configs = rows.results.map(r => ({
-    feedId: r.feed_id,
-    ownerDid: r.owner_did,
-    name: r.name,
-    description: r.description,
-    intentText: r.intent_text,
-    terms: JSON.parse(r.terms) as string[],
-    excludeTerms: JSON.parse(r.exclude_terms) as string[],
-    seedAccounts: JSON.parse(r.seed_accounts) as string[],
-    active: Boolean(r.active),
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-    tierAtCreation: r.tier_at_creation,
-  }))
+  for (const feed of feeds.results) {
+    try {
+      // Fetch HITL signals for this feed from the last 7 days
+      const hitl = await env.DB
+        .prepare(`
+          SELECT post_uri, signal FROM hitl_events
+          WHERE feed_id = ? AND created_at >= ?
+          ORDER BY created_at DESC LIMIT 50
+        `)
+        .bind(feed.feed_id, weekAgo)
+        .all<{ post_uri: string; signal: number }>()
 
-  return Response.json({ configs }, { headers: HEADERS })
-}
+      const upCount   = hitl.results.filter(h => h.signal === 1).length
+      const downCount = hitl.results.filter(h => h.signal === -1).length
+      if (upCount + downCount < 5) continue  // not enough signal
 
-// ---------------------------------------------------------------------------
-// Internal: POST /internal/posts
-// Accepts batched post inserts from the filter engine.
-// Body: { posts: PostMatch[] }
-// ---------------------------------------------------------------------------
+      const prompt = `You are reviewing a Bluesky feed config for weekly quality improvement.
 
-interface PostMatch {
-  feedId: string
-  postUri: string
-  postCid: string
-  authorDid: string
-  indexedAt: number
-  expiresAt: number
-}
+Feed name: ${feed.name}
+Original intent: "${feed.intent_text}"
+Current terms: ${JSON.parse(feed.terms as string).join(', ')}
+Current excludeTerms: ${JSON.parse(feed.exclude_terms as string).join(', ')}
+Recent HITL signals: ${upCount} thumbs up, ${downCount} thumbs down
 
-async function handlePostInsert(req: Request, env: Env): Promise<Response> {
-  if (!checkInternalAuth(req, env)) {
-    return Response.json({ error: 'unauthorized' }, { status: 401, headers: HEADERS })
+Based on this engagement pattern, suggest 1-3 specific changes to improve the feed.
+Respond with concise bullet points only. Be specific (e.g. "add term X", "remove exclude term Y", "add seed account @user").`
+
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model:      'claude-sonnet-4-6',
+          max_tokens: 300,
+          messages:   [{ role: 'user', content: prompt }],
+        }),
+      })
+
+      if (!res.ok) continue
+      const data = await res.json() as { content: Array<{ type: string; text: string }> }
+      const suggestion = data.content.find(c => c.type === 'text')?.text ?? ''
+
+      if (suggestion) {
+        // Store as a HITL event with session_type='weekly_review' for the dashboard to surface
+        // Future: write to a dedicated suggestions table
+        console.log(`[weekly] suggestion for ${feed.feed_id}:`, suggestion.slice(0, 200))
+      }
+    } catch (e) {
+      console.error(`[weekly] failed for feed ${feed.feed_id}:`, e)
+    }
   }
-
-  let body: { posts: PostMatch[] }
-  try {
-    body = await req.json() as { posts: PostMatch[] }
-  } catch {
-    return Response.json({ error: 'invalid JSON body' }, { status: 400, headers: HEADERS })
-  }
-
-  const posts = body?.posts
-  if (!Array.isArray(posts) || posts.length === 0) {
-    return Response.json({ inserted: 0 }, { headers: HEADERS })
-  }
-
-  // Batch insert using D1's batch API
-  // INSERT OR IGNORE skips duplicates (same feed_id + post_uri)
-  const stmts = posts.map(p =>
-    env.DB
-      .prepare(`
-        INSERT OR IGNORE INTO feed_posts (feed_id, post_uri, post_cid, author_did, indexed_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `)
-      .bind(p.feedId, p.postUri, p.postCid, p.authorDid, p.indexedAt, p.expiresAt)
-  )
-
-  await env.DB.batch(stmts)
-
-  return Response.json({ inserted: posts.length }, { headers: HEADERS })
-}
-
-// ---------------------------------------------------------------------------
-// Public: GET /xrpc/app.bsky.feed.getFeedSkeleton
-// ---------------------------------------------------------------------------
-
-async function handleGetFeedSkeleton(
-  _req: Request,
-  env: Env,
-  url: URL,
-): Promise<Response> {
-  const feedUri = url.searchParams.get('feed')
-  const cursor = url.searchParams.get('cursor')
-  const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50'), 100)
-
-  if (!feedUri) {
-    return Response.json({ error: 'feed parameter required' }, { status: 400, headers: HEADERS })
-  }
-
-  // Extract feed_id from AT URI: at://did:.../app.bsky.feed.generator/<feed_id>
-  const feedId = feedUri.split('/').at(-1)
-  if (!feedId) {
-    return Response.json({ error: 'invalid feed URI' }, { status: 400, headers: HEADERS })
-  }
-
-  // Look up feed config
-  const config = await env.DB
-    .prepare('SELECT feed_id, owner_did, active FROM feed_configs WHERE feed_id = ?')
-    .bind(feedId)
-    .first<{ feed_id: string; owner_did: string; active: number }>()
-
-  if (!config) {
-    return Response.json({ error: 'feed not found' }, { status: 404, headers: HEADERS })
-  }
-
-  if (!config.active) {
-    // Feed paused — return empty skeleton, not an error
-    return Response.json({ feed: [] }, { headers: HEADERS })
-  }
-
-  // Enforce view cap
-  const capResult = await enforceViewCap(env, config.feed_id, config.owner_did)
-  if (!capResult.allowed) {
-    // Over cap with no auto-charge — pause appearance
-    return Response.json({ feed: [] }, { headers: HEADERS })
-  }
-
-  // Fetch posts with cursor pagination
-  const cursorTs = cursor ? parseInt(cursor) : Date.now()
-  const posts = await env.DB
-    .prepare(`
-      SELECT post_uri, indexed_at
-      FROM feed_posts
-      WHERE feed_id = ?
-        AND indexed_at < ?
-        AND expires_at > ?
-      ORDER BY indexed_at DESC
-      LIMIT ?
-    `)
-    .bind(feedId, cursorTs, Date.now(), limit)
-    .all<{ post_uri: string; indexed_at: number }>()
-
-  const feed = posts.results.map(p => ({ post: p.post_uri }))
-  const nextCursor = posts.results.at(-1)?.indexed_at.toString()
-
-  return Response.json(
-    { feed, ...(nextCursor ? { cursor: nextCursor } : {}) },
-    { headers: HEADERS },
-  )
-}
-
-async function enforceViewCap(
-  env: Env,
-  feedId: string,
-  ownerDid: string,
-): Promise<{ allowed: boolean }> {
-  const day = Math.floor(Date.now() / 86_400_000)
-
-  // Get owner tier and monthly view limit
-  const user = await env.DB
-    .prepare('SELECT tier, monthly_views, view_reset_at FROM users WHERE did = ?')
-    .bind(ownerDid)
-    .first<{ tier: string; monthly_views: number; view_reset_at: number }>()
-
-  if (!user) return { allowed: true } // unknown user, allow
-
-  // TODO: implement full cap + overage logic against tier limits
-  // For MVP: always allow, log view event
-  await env.DB
-    .prepare(`
-      INSERT INTO view_events (feed_id, owner_did, day, view_count)
-      VALUES (?, ?, ?, 1)
-      ON CONFLICT (feed_id, day) DO UPDATE SET view_count = view_count + 1
-    `)
-    .bind(feedId, ownerDid, day)
-    .run()
-
-  return { allowed: true }
-}
-
-async function runWeeklyRefinement(_env: Env): Promise<void> {
-  // TODO: query Pro/Studio feeds with recent HITL activity
-  // Call agent with config + HITL signals → generate suggestion
-  // Store suggestion for display in dashboard
-  console.log('Weekly refinement cron — not yet implemented')
 }

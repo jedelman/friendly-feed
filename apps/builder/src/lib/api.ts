@@ -125,10 +125,10 @@ export async function getReviewQueue(token: string): Promise<ReviewQueueItem[]> 
   return data.queue
 }
 
-export async function approveReview(id: number, token: string): Promise<void> {
-  await req(`/api/admin/queue/${id}/approve`, { method: 'POST' }, token)
+export async function approveReview(feedId: string, token: string): Promise<void> {
+  await req(`/api/admin/queue/${feedId}/approve`, { method: 'POST' }, token)
 }
 
-export async function rejectReview(id: number, token: string): Promise<void> {
-  await req(`/api/admin/queue/${id}/reject`, { method: 'POST' }, token)
+export async function rejectReview(feedId: string, token: string): Promise<void> {
+  await req(`/api/admin/queue/${feedId}/reject`, { method: 'POST' }, token)
 }

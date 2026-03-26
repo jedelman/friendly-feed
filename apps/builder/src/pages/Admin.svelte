@@ -55,14 +55,14 @@
     authenticated = false
   }
 
-  async function approve(id: number) {
-    await approveReview(id, token)
-    queue = queue.filter(i => i.id !== id)
+  async function approve(feedId: string) {
+    await approveReview(feedId, token)
+    queue = queue.filter(i => i.feedId !== feedId)
   }
 
-  async function reject(id: number) {
-    await rejectReview(id, token)
-    queue = queue.filter(i => i.id !== id)
+  async function reject(feedId: string) {
+    await rejectReview(feedId, token)
+    queue = queue.filter(i => i.feedId !== feedId)
   }
 
   function onEnter(e: KeyboardEvent) {
@@ -253,13 +253,13 @@
                   <div class="ml-auto flex gap-8">
                     <button
                       class="btn btn-sm btn-secondary"
-                      onclick={() => approve(item.id)}
+                      onclick={() => approve(item.feedId)}
                     >
                       Approve
                     </button>
                     <button
                       class="btn btn-sm btn-danger"
-                      onclick={() => reject(item.id)}
+                      onclick={() => reject(item.feedId)}
                     >
                       Reject
                     </button>
