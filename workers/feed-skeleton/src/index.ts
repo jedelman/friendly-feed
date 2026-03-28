@@ -27,7 +27,7 @@
  *     POST /internal/posts
  *
  *   Cron
- *     Monday 9am UTC — weekly feed refinement suggestions
+ *     Scheduled — feed refinement suggestions (Pro/Studio)
  */
 
 import { type Env, CORS, json } from './types'
@@ -112,15 +112,15 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await runWeeklyRefinement(env)
+    await runRefinement(env)
   },
 }
 
 // ---------------------------------------------------------------------------
-// Weekly cron — Pro/Studio feed refinement suggestions
+// Scheduled cron — Pro/Studio feed refinement suggestions
 // ---------------------------------------------------------------------------
 
-async function runWeeklyRefinement(env: Env): Promise<void> {
+async function runRefinement(env: Env): Promise<void> {
   if (!env.ANTHROPIC_API_KEY) return
 
   // Find Pro/Studio feeds with HITL activity in the last 7 days
@@ -159,7 +159,7 @@ async function runWeeklyRefinement(env: Env): Promise<void> {
       const downCount = hitl.results.filter(h => h.signal === -1).length
       if (upCount + downCount < 5) continue  // not enough signal
 
-      const prompt = `You are reviewing a Bluesky feed config for weekly quality improvement.
+      const prompt = `You are reviewing a Bluesky feed config and suggesting improvements based on user engagement.
 
 Feed name: ${feed.name}
 Original intent: "${feed.intent_text}"
@@ -167,8 +167,13 @@ Current terms: ${JSON.parse(feed.terms as string).join(', ')}
 Current excludeTerms: ${JSON.parse(feed.exclude_terms as string).join(', ')}
 Recent HITL signals: ${upCount} thumbs up, ${downCount} thumbs down
 
-Based on this engagement pattern, suggest 1-3 specific changes to improve the feed.
-Respond with concise bullet points only. Be specific (e.g. "add term X", "remove exclude term Y", "add seed account @user").`
+Suggest 1-3 specific changes to improve this feed based on the engagement pattern.
+Respond with JSON only — no prose, no markdown fences:
+{
+  "changes": [
+    { "op": "add_term" | "remove_term" | "add_exclude" | "remove_exclude" | "add_seed" | "remove_seed", "value": "<string>", "reason": "<one sentence>" }
+  ]
+}`
 
       const res = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -179,22 +184,29 @@ Respond with concise bullet points only. Be specific (e.g. "add term X", "remove
         },
         body: JSON.stringify({
           model:      'claude-sonnet-4-6',
-          max_tokens: 300,
+          max_tokens: 400,
           messages:   [{ role: 'user', content: prompt }],
         }),
       })
 
       if (!res.ok) continue
       const data = await res.json() as { content: Array<{ type: string; text: string }> }
-      const suggestion = data.content.find(c => c.type === 'text')?.text ?? ''
+      const raw  = data.content.find(c => c.type === 'text')?.text ?? ''
 
-      if (suggestion) {
-        // Store as a HITL event with session_type='weekly_review' for the dashboard to surface
-        // Future: write to a dedicated suggestions table
-        console.log(`[weekly] suggestion for ${feed.feed_id}:`, suggestion.slice(0, 200))
+      let suggestion: { changes: Array<{ op: string; value: string; reason: string }> }
+      try {
+        suggestion = JSON.parse(raw)
+      } catch {
+        console.error(`[refinement] non-JSON response for ${feed.feed_id}:`, raw.slice(0, 200))
+        continue
+      }
+
+      if (suggestion.changes?.length) {
+        // Future: write to a dedicated suggestions table for the dashboard to surface
+        console.log(`[refinement] ${feed.feed_id}:`, JSON.stringify(suggestion.changes))
       }
     } catch (e) {
-      console.error(`[weekly] failed for feed ${feed.feed_id}:`, e)
+      console.error(`[refinement] failed for feed ${feed.feed_id}:`, e)
     }
   }
 }
