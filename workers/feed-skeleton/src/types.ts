@@ -11,10 +11,13 @@ export interface Env {
   // Claude API — set via `wrangler secret put ANTHROPIC_API_KEY`
   ANTHROPIC_API_KEY: string
 
-  // OpenSearch / Palomar — optional; preview falls back to Bluesky search if unset
-  OPENSEARCH_URL: string       // e.g. https://my-cluster.us-east-1.es.amazonaws.com
-  OPENSEARCH_USERNAME: string
-  OPENSEARCH_PASSWORD: string
+  // Amazon OpenSearch Serverless — optional; preview falls back to Bluesky search if unset.
+  // Endpoint format: https://<collection-id>.<region>.aoss.amazonaws.com
+  OPENSEARCH_URL: string
+  // IAM credentials for SigV4 signing (service = 'aoss')
+  AWS_ACCESS_KEY_ID:     string
+  AWS_SECRET_ACCESS_KEY: string
+  AWS_REGION:            string   // default: us-east-1
 }
 
 export interface FeedRow {

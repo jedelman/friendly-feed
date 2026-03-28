@@ -179,44 +179,80 @@ Note this — you'll need it for the filter engine: `http://tap.railway.internal
 
 ---
 
-## Step 4 — Provision Amazon OpenSearch Service
+## Step 4 — Provision Amazon OpenSearch Serverless
 
 The filter engine uses the OpenSearch **Percolator** to match incoming posts against all
-active feed configs in a single API call. You need a running cluster before deploying
-the filter engine.
+active feed configs in a single API call. Auth is AWS SigV4 (no username/password).
 
-### 4a. Create the cluster
+> **Cost note:** OpenSearch Serverless bills per OCU-hour (~$0.24/OCU/hr). A minimal
+> collection idles at 2 OCUs (~$350/month). For low-volume launch, consider starting
+> with a **provisioned** `t3.small.search` domain (~$30/month) and migrating to
+> Serverless when throughput warrants it. The code works identically for both — just
+> change `service: 'aoss'` → `service: 'es'` and add fine-grained access control
+> credentials if you go provisioned first.
 
-In the AWS console → OpenSearch Service → Create domain:
+### 4a. Create the Serverless collection
+
+1. AWS console → **OpenSearch Service → Serverless → Collections → Create collection**
+2. Settings:
 
 | Setting | Value |
 |---|---|
-| Domain name | `friendly-feed` |
-| Deployment type | **Development and testing** (single-AZ for cost) |
-| Version | OpenSearch 2.x (latest) |
-| Instance type | `t3.small.search` (~$30/month) |
-| Storage | 20 GB EBS gp3 |
-| Access policy | **Only use fine-grained access control** |
-| Master user | username `admin`, strong password |
+| Collection name | `friendly-feed` |
+| Type | **Search** |
+| Encryption | AWS-owned key (default) |
+| Network access | **Public** (simplest; restrict to VPC later if needed) |
 
-Creation takes 10–15 minutes. Note the **Domain endpoint** URL when it appears:
-`https://your-cluster.us-east-1.es.amazonaws.com`
+3. Creation takes 2–5 minutes. Note the **Collection endpoint** URL:
+   `https://<collection-id>.<region>.aoss.amazonaws.com`
 
-### 4b. Set OpenSearch secrets on the CF Worker
+### 4b. Create an IAM user for the service
+
+```bash
+# Create user
+aws iam create-user --user-name friendly-feed-opensearch
+
+# Attach an inline policy allowing aoss:APIAccessAll on your collection
+aws iam put-user-policy \
+  --user-name friendly-feed-opensearch \
+  --policy-name FriendlyFeedAoss \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": "aoss:APIAccessAll",
+      "Resource": "arn:aws:aoss:<region>:<account-id>:collection/<collection-id>"
+    }]
+  }'
+
+# Create access key
+aws iam create-access-key --user-name friendly-feed-opensearch
+# Save AccessKeyId and SecretAccessKey
+```
+
+Also add a **Data access policy** in the OpenSearch Serverless console
+(Collections → your collection → Data access) granting the IAM user
+`aoss:ReadDocument`, `aoss:WriteDocument`, `aoss:CreateIndex`,
+`aoss:DeleteIndex`, `aoss:UpdateIndex`, `aoss:DescribeIndex` on all indexes.
+
+### 4c. Set OpenSearch secrets on the CF Worker
 
 ```bash
 cd workers/feed-skeleton
 
 wrangler secret put OPENSEARCH_URL
-# paste: https://your-cluster.us-east-1.es.amazonaws.com
+# paste: https://<collection-id>.<region>.aoss.amazonaws.com
 
-wrangler secret put OPENSEARCH_PASSWORD
-# paste: the master user password from 4a
+wrangler secret put AWS_ACCESS_KEY_ID
+# paste: AccessKeyId from 4b
+
+wrangler secret put AWS_SECRET_ACCESS_KEY
+# paste: SecretAccessKey from 4b
 ```
 
-Add to `wrangler.toml` `[vars]`:
+Optionally add to `wrangler.toml` `[vars]` if your region isn't `us-east-1`:
 ```toml
-OPENSEARCH_USERNAME = "admin"
+AWS_REGION = "us-east-1"
 ```
 
 Redeploy the Worker:
@@ -224,9 +260,9 @@ Redeploy the Worker:
 wrangler deploy
 ```
 
-### 4c. Bootstrap the percolator index
+### 4d. Bootstrap the percolator index
 
-The index must exist before the filter engine starts. With your cluster running and Worker redeployed:
+The index must exist before the filter engine starts. With your collection running and Worker redeployed:
 
 ```bash
 curl -X POST https://friendly-feed.jason-edelman.org/internal/percolator/sync \
@@ -253,9 +289,10 @@ Set **Root Directory** to `/` so Railway finds `services/filter-engine/railway.t
 |---|---|
 | `TAP_URL` | `http://tap.railway.internal:2480` (private network hostname from Step 3e) |
 | `TAP_ADMIN_PASSWORD` | same value set on the Tap service |
-| `OPENSEARCH_URL` | `https://your-cluster.us-east-1.es.amazonaws.com` |
-| `OPENSEARCH_USERNAME` | `admin` |
-| `OPENSEARCH_PASSWORD` | OpenSearch master password |
+| `OPENSEARCH_URL` | `https://<collection-id>.<region>.aoss.amazonaws.com` |
+| `AWS_ACCESS_KEY_ID` | IAM access key from Step 4b |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret key from Step 4b |
+| `AWS_REGION` | e.g. `us-east-1` |
 | `WRITE_ENDPOINT_URL` | `https://friendly-feed.jason-edelman.org/internal/posts` |
 | `WRITE_ENDPOINT_SECRET` | same value as `INTERNAL_SECRET` |
 
@@ -372,7 +409,7 @@ When you fork Palomar:
 5. Use Tap manually for **backfill**: point it at the filter engine briefly to hydrate the
    `palomar_post` index for the period before Palomar was running
 
-No new infrastructure is needed — the same OpenSearch cluster from Step 4 serves both indices.
+No new infrastructure is needed — the same OpenSearch Serverless collection from Step 4 serves both indices.
 
 ---
 
@@ -387,6 +424,8 @@ Keep this updated. All values live in CF Secrets or Railway Variables — never 
 | `ANTHROPIC_API_KEY` | CF Worker secret | Claude API for feed generation |
 | `TAP_ADMIN_PASSWORD` | Railway (Tap) | Tap WebSocket auth |
 | `TAP_ADMIN_PASSWORD` | Railway (Filter Engine) | Must match Tap value |
-| `OPENSEARCH_PASSWORD` | Railway (Filter Engine) | OpenSearch master password |
-| `OPENSEARCH_PASSWORD` | CF Worker secret | OpenSearch master password (same value) |
+| `AWS_ACCESS_KEY_ID` | Railway (Filter Engine) | IAM key for OpenSearch Serverless |
+| `AWS_SECRET_ACCESS_KEY` | Railway (Filter Engine) | IAM secret for OpenSearch Serverless |
+| `AWS_ACCESS_KEY_ID` | CF Worker secret | IAM key for OpenSearch Serverless (same value) |
+| `AWS_SECRET_ACCESS_KEY` | CF Worker secret | IAM secret for OpenSearch Serverless (same value) |
 | `WRITE_ENDPOINT_SECRET` | Railway (Filter Engine) | Must match `INTERNAL_SECRET` |

@@ -10,6 +10,7 @@
  * The Bluesky fallback is sufficient for MVP and requires no infrastructure.
  */
 
+import { AwsClient } from 'aws4fetch'
 import { type Env, json, err } from '../types'
 
 const BSKY_API      = 'https://public.api.bsky.app/xrpc'
@@ -150,14 +151,16 @@ async function previewFromOpenSearch(
     _source: ['did', 'text', 'created_at', 'handle', 'rkey'],
   }
 
-  const auth = btoa(`${env.OPENSEARCH_USERNAME}:${env.OPENSEARCH_PASSWORD}`)
-  const res  = await fetch(`${env.OPENSEARCH_URL}/palomar_post/_search`, {
-    method: 'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Basic ${auth}`,
-    },
-    body: JSON.stringify(query),
+  const aws = new AwsClient({
+    accessKeyId:     env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    region:          env.AWS_REGION ?? 'us-east-1',
+    service:         'aoss',
+  })
+  const res = await aws.fetch(`${env.OPENSEARCH_URL}/palomar_post/_search`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(query),
   })
 
   if (!res.ok) {

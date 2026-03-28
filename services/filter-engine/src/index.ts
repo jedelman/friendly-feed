@@ -8,22 +8,25 @@
  * Required env vars:
  *   TAP_URL                - Tap HTTP base URL  (e.g. http://tap.railway.internal:2480)
  *   TAP_ADMIN_PASSWORD     - matches TAP_ADMIN_PASSWORD on the Tap container
- *   OPENSEARCH_URL         - https://<cluster>.us-east-1.es.amazonaws.com
- *   OPENSEARCH_USERNAME    - e.g. admin
- *   OPENSEARCH_PASSWORD    - master user password
+ *   OPENSEARCH_URL         - https://<collection-id>.<region>.aoss.amazonaws.com
+ *   AWS_ACCESS_KEY_ID      - IAM user access key (service = aoss)
+ *   AWS_SECRET_ACCESS_KEY  - IAM user secret key
+ *   AWS_REGION             - e.g. us-east-1
  *   WRITE_ENDPOINT_URL     - CF Worker /internal/posts URL
  *   WRITE_ENDPOINT_SECRET  - shared secret (INTERNAL_SECRET on the Worker)
  */
 
+import aws4 from 'aws4'
 import { Tap } from '@atproto/tap'
 import { batchWrite } from './writer.js'
 
-const TAP_URL           = process.env.TAP_URL           ?? 'http://localhost:2480'
+const TAP_URL            = process.env.TAP_URL            ?? 'http://localhost:2480'
 const TAP_ADMIN_PASSWORD = process.env.TAP_ADMIN_PASSWORD ?? ''
-const OPENSEARCH_URL    = process.env.OPENSEARCH_URL     ?? ''
-const OPENSEARCH_USER   = process.env.OPENSEARCH_USERNAME ?? 'admin'
-const OPENSEARCH_PASS   = process.env.OPENSEARCH_PASSWORD ?? ''
-const PERCOLATOR_INDEX  = 'ff_feed_queries'
+const OPENSEARCH_URL     = process.env.OPENSEARCH_URL     ?? ''
+const AWS_ACCESS_KEY_ID  = process.env.AWS_ACCESS_KEY_ID  ?? ''
+const AWS_SECRET_KEY     = process.env.AWS_SECRET_ACCESS_KEY ?? ''
+const AWS_REGION         = process.env.AWS_REGION         ?? 'us-east-1'
+const PERCOLATOR_INDEX   = 'ff_feed_queries'
 
 // TTL by tier — mirrors the CF Worker's getTtlMs
 const TTL_MS: Record<string, number> = {
@@ -49,24 +52,36 @@ async function percolate(
   text: string,
   did: string,
 ): Promise<Array<{ feedId: string; tier: string }>> {
-  const creds = Buffer.from(`${OPENSEARCH_USER}:${OPENSEARCH_PASS}`).toString('base64')
-
-  const res = await fetch(`${OPENSEARCH_URL}/${PERCOLATOR_INDEX}/_search`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Basic ${creds}`,
-    },
-    body: JSON.stringify({
-      query: {
-        percolate: {
-          field:    'query',
-          document: { text, did },
-        },
+  const path   = `/${PERCOLATOR_INDEX}/_search`
+  const parsed = new URL(`${OPENSEARCH_URL}${path}`)
+  const body   = JSON.stringify({
+    query: {
+      percolate: {
+        field:    'query',
+        document: { text, did },
       },
-      _source: ['feed_id', 'tier'],
-      size:    1000,   // max feeds that can match a single post
-    }),
+    },
+    _source: ['feed_id', 'tier'],
+    size:    1000,   // max feeds that can match a single post
+  })
+
+  const signed = aws4.sign(
+    {
+      host:    parsed.hostname,
+      path:    parsed.pathname,
+      method:  'POST',
+      service: 'aoss',
+      region:  AWS_REGION,
+      body,
+      headers: { 'Content-Type': 'application/json' },
+    },
+    { accessKeyId: AWS_ACCESS_KEY_ID, secretAccessKey: AWS_SECRET_KEY },
+  )
+
+  const res = await fetch(`${OPENSEARCH_URL}${path}`, {
+    method:  'POST',
+    headers: signed.headers as HeadersInit,
+    body,
   })
 
   if (!res.ok) {
@@ -90,10 +105,22 @@ async function checkOpenSearch(): Promise<void> {
     throw new Error('OPENSEARCH_URL is not set')
   }
 
-  const creds = Buffer.from(`${OPENSEARCH_USER}:${OPENSEARCH_PASS}`).toString('base64')
-  const res = await fetch(`${OPENSEARCH_URL}/${PERCOLATOR_INDEX}`, {
-    method: 'HEAD',
-    headers: { 'Authorization': `Basic ${creds}` },
+  const path   = `/${PERCOLATOR_INDEX}`
+  const parsed = new URL(`${OPENSEARCH_URL}${path}`)
+  const signed = aws4.sign(
+    {
+      host:    parsed.hostname,
+      path:    parsed.pathname,
+      method:  'HEAD',
+      service: 'aoss',
+      region:  AWS_REGION,
+    },
+    { accessKeyId: AWS_ACCESS_KEY_ID, secretAccessKey: AWS_SECRET_KEY },
+  )
+
+  const res = await fetch(`${OPENSEARCH_URL}${path}`, {
+    method:  'HEAD',
+    headers: signed.headers as HeadersInit,
   })
 
   if (res.status === 404) {

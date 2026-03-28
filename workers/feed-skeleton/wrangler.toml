@@ -14,16 +14,17 @@ database_id = "12f77c98-595b-4919-9555-a334e0948ad5"
 [vars]
 SERVICE_DID = "did:web:feeds.friendlyfeed.app"
 
-# Optional: if set, /api/preview queries your own OpenSearch cluster.
+# Optional: if set, /api/preview queries your own OpenSearch Serverless collection.
 # If unset, preview falls back to Bluesky's public search API (fine for MVP).
-# OPENSEARCH_URL      = "https://your-cluster.us-east-1.es.amazonaws.com"
-# OPENSEARCH_USERNAME = "admin"
+# OPENSEARCH_URL = "https://<collection-id>.<region>.aoss.amazonaws.com"
+# AWS_REGION     = "us-east-1"
 
 # Secrets — set via `wrangler secret put <NAME>` (never commit values):
-#   wrangler secret put INTERNAL_SECRET    # shared with Railway filter engine
-#   wrangler secret put ADMIN_SECRET       # admin dashboard token
-#   wrangler secret put ANTHROPIC_API_KEY  # Claude API key
-#   wrangler secret put OPENSEARCH_PASSWORD  # if using own OpenSearch
+#   wrangler secret put INTERNAL_SECRET        # shared with Railway filter engine
+#   wrangler secret put ADMIN_SECRET           # admin dashboard token
+#   wrangler secret put ANTHROPIC_API_KEY      # Claude API key
+#   wrangler secret put AWS_ACCESS_KEY_ID      # IAM key for OpenSearch Serverless (aoss)
+#   wrangler secret put AWS_SECRET_ACCESS_KEY  # IAM secret for OpenSearch Serverless
 
 # Cron for weekly agent refinement suggestions (Pro/Studio)
 [triggers]
