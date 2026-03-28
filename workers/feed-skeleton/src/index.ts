@@ -43,7 +43,7 @@ import {
   handleAdminStats, handleAdminQueue,
   handleAdminApprove, handleAdminReject,
 } from './handlers/admin'
-import { handleGetConfigs, handlePostInsert } from './handlers/internal'
+import { handleGetConfigs, handlePostInsert, handlePercolatorSync } from './handlers/internal'
 import { handleGetFeedSkeleton }              from './handlers/skeleton'
 
 export { type Env }
@@ -104,8 +104,9 @@ export default {
     if (rejectMatch && method === 'POST')  return handleAdminReject(req, env, rejectMatch[1])
 
     // ── Internal (filter engine) ─────────────────────────────────────────
-    if (path === '/internal/configs' && method === 'GET')  return handleGetConfigs(req, env)
-    if (path === '/internal/posts'   && method === 'POST') return handlePostInsert(req, env)
+    if (path === '/internal/configs'          && method === 'GET')  return handleGetConfigs(req, env)
+    if (path === '/internal/posts'            && method === 'POST') return handlePostInsert(req, env)
+    if (path === '/internal/percolator/sync'  && method === 'POST') return handlePercolatorSync(req, env)
 
     return new Response('Not found', { status: 404 })
   },

@@ -7,6 +7,7 @@
  */
 
 import { type Env, type FeedRow, feedRowToConfig, json, err } from '../types'
+import { ensurePercolatorIndex, indexFeedQuery, deleteFeedQuery } from '../lib/opensearch'
 
 const TIER_MAX_FEEDS: Record<string, number> = {
   free:   1,
@@ -133,6 +134,20 @@ export async function handleCreateFeed(req: Request, env: Env): Promise<Response
     ] : []),
   ])
 
+  // Sync to percolator index (fire-and-forget — D1 is source of truth)
+  // Only index active feeds; flagged feeds start paused so they don't match yet.
+  if (!needsReview && env.OPENSEARCH_URL) {
+    ensurePercolatorIndex(env)
+      .then(() => indexFeedQuery(env, {
+        feedId,
+        tier:         user.tier,
+        terms:        terms.slice(0, 30),
+        excludeTerms: (excludeTerms ?? []).slice(0, 20),
+        seedAccounts: (seedAccounts ?? []).slice(0, 20),
+      }))
+      .catch(e => console.error('[feeds] percolator index failed for', feedId, e))
+  }
+
   return json({ feedId, active: !needsReview, flagged: needsReview }, 201)
 }
 
@@ -185,6 +200,30 @@ export async function handleUpdateFeed(
     .bind(...binds)
     .run()
 
+  // Sync percolator: re-fetch the updated row and re-index (or remove if paused)
+  if (env.OPENSEARCH_URL) {
+    const updated = await env.DB
+      .prepare('SELECT terms, exclude_terms, seed_accounts, active, tier_at_creation FROM feed_configs WHERE feed_id = ?')
+      .bind(feedId)
+      .first<{ terms: string; exclude_terms: string; seed_accounts: string; active: number; tier_at_creation: string }>()
+
+    if (updated) {
+      if (updated.active) {
+        indexFeedQuery(env, {
+          feedId,
+          tier:         updated.tier_at_creation,
+          terms:        JSON.parse(updated.terms) as string[],
+          excludeTerms: JSON.parse(updated.exclude_terms) as string[],
+          seedAccounts: JSON.parse(updated.seed_accounts) as string[],
+        }).catch(e => console.error('[feeds] percolator re-index failed for', feedId, e))
+      } else {
+        // Feed paused — remove from percolator so it stops matching
+        deleteFeedQuery(env, feedId)
+          .catch(e => console.error('[feeds] percolator delete failed for', feedId, e))
+      }
+    }
+  }
+
   return json({ ok: true })
 }
 
@@ -213,6 +252,12 @@ export async function handleDeleteFeed(
     env.DB.prepare('UPDATE users SET feeds_count = MAX(0, feeds_count - 1) WHERE did = ?')
       .bind(existing.owner_did),
   ])
+
+  // Remove from percolator index (fire-and-forget)
+  if (env.OPENSEARCH_URL) {
+    deleteFeedQuery(env, feedId)
+      .catch(e => console.error('[feeds] percolator delete failed for', feedId, e))
+  }
 
   return json({ ok: true })
 }

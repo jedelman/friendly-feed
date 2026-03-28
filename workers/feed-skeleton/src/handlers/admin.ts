@@ -8,6 +8,7 @@
  */
 
 import { type Env, json, err } from '../types'
+import { indexFeedQuery, deleteFeedQuery } from '../lib/opensearch'
 
 function checkAdminAuth(req: Request, env: Env): boolean {
   const auth = req.headers.get('Authorization') ?? ''
@@ -153,6 +154,23 @@ export async function handleAdminApprove(
     `).bind(feedId),
   ])
 
+  // Feed is now active — add it to the percolator so it starts matching
+  if (env.OPENSEARCH_URL) {
+    const row = await env.DB
+      .prepare('SELECT terms, exclude_terms, seed_accounts, tier_at_creation FROM feed_configs WHERE feed_id = ?')
+      .bind(feedId)
+      .first<{ terms: string; exclude_terms: string; seed_accounts: string; tier_at_creation: string }>()
+    if (row) {
+      indexFeedQuery(env, {
+        feedId,
+        tier:         row.tier_at_creation,
+        terms:        JSON.parse(row.terms) as string[],
+        excludeTerms: JSON.parse(row.exclude_terms) as string[],
+        seedAccounts: JSON.parse(row.seed_accounts) as string[],
+      }).catch(e => console.error('[admin] percolator index failed after approve', feedId, e))
+    }
+  }
+
   return json({ ok: true })
 }
 
@@ -176,6 +194,12 @@ export async function handleAdminReject(
       UPDATE feed_configs SET active = 0 WHERE feed_id = ?
     `).bind(feedId),
   ])
+
+  // Ensure the feed is not in the percolator (it was never added, but be safe)
+  if (env.OPENSEARCH_URL) {
+    deleteFeedQuery(env, feedId)
+      .catch(e => console.error('[admin] percolator delete failed after reject', feedId, e))
+  }
 
   return json({ ok: true })
 }

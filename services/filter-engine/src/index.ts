@@ -1,74 +1,133 @@
 /**
- * Friendly Feed — Filter Engine
+ * Friendly Feed — Filter Engine (percolator edition)
  *
- * Connects to Tap via @atproto/tap WebSocket client.
- * Loads feed configs from D1, matches incoming posts, writes matched URIs back to D1.
- *
- * Deploy alongside Tap container on Railway.
+ * Connects to Tap, and for each incoming post issues a single percolate
+ * query to Amazon OpenSearch Service. OpenSearch returns every feed whose
+ * stored query matches the post — no in-process fan-out, no config polling.
  *
  * Required env vars:
- *   TAP_URL                  - Tap HTTP base URL (e.g. http://tap.railway.internal:2480)
- *   TAP_ADMIN_PASSWORD       - matches TAP_ADMIN_PASSWORD on the Tap container
- *   CONFIG_ENDPOINT_URL      - CF Worker /internal/configs URL
- *   CONFIG_ENDPOINT_SECRET   - shared secret for internal Worker endpoints
- *   WRITE_ENDPOINT_URL       - CF Worker /internal/posts URL
- *   WRITE_ENDPOINT_SECRET    - shared secret for internal Worker endpoints
+ *   TAP_URL                - Tap HTTP base URL  (e.g. http://tap.railway.internal:2480)
+ *   TAP_ADMIN_PASSWORD     - matches TAP_ADMIN_PASSWORD on the Tap container
+ *   OPENSEARCH_URL         - https://<cluster>.us-east-1.es.amazonaws.com
+ *   OPENSEARCH_USERNAME    - e.g. admin
+ *   OPENSEARCH_PASSWORD    - master user password
+ *   WRITE_ENDPOINT_URL     - CF Worker /internal/posts URL
+ *   WRITE_ENDPOINT_SECRET  - shared secret (INTERNAL_SECRET on the Worker)
  */
 
 import { Tap } from '@atproto/tap'
-import { matchPost } from './matcher.js'
 import { batchWrite } from './writer.js'
-import type { FeedConfig } from '../../../packages/shared/src/types.js'
 
-// Tap URL must be http:// — the client converts to ws:// internally for the channel
-const TAP_URL = process.env.TAP_URL ?? 'http://localhost:2480'
+const TAP_URL           = process.env.TAP_URL           ?? 'http://localhost:2480'
 const TAP_ADMIN_PASSWORD = process.env.TAP_ADMIN_PASSWORD ?? ''
-const CONFIG_POLL_INTERVAL_MS = 60_000
+const OPENSEARCH_URL    = process.env.OPENSEARCH_URL     ?? ''
+const OPENSEARCH_USER   = process.env.OPENSEARCH_USERNAME ?? 'admin'
+const OPENSEARCH_PASS   = process.env.OPENSEARCH_PASSWORD ?? ''
+const PERCOLATOR_INDEX  = 'ff_feed_queries'
 
-// In-memory config store — refreshed every 60s from D1 via CF Worker endpoint
-let activeConfigs: FeedConfig[] = []
-
-async function loadConfigs(): Promise<void> {
-  const configUrl = process.env.CONFIG_ENDPOINT_URL
-  if (!configUrl) {
-    console.warn('[config] CONFIG_ENDPOINT_URL not set — running with empty config (skeleton mode)')
-    return
-  }
-  try {
-    const res = await fetch(configUrl, {
-      headers: { Authorization: `Bearer ${process.env.CONFIG_ENDPOINT_SECRET}` },
-    })
-    if (!res.ok) {
-      console.error(`[config] fetch failed: ${res.status} ${res.statusText}`)
-      return
-    }
-    const body = await res.json() as { configs: FeedConfig[] }
-    activeConfigs = body.configs ?? []
-    console.log(`[config] loaded ${activeConfigs.length} active feed config(s)`)
-  } catch (err) {
-    console.error('[config] failed to load:', err)
-  }
+// TTL by tier — mirrors the CF Worker's getTtlMs
+const TTL_MS: Record<string, number> = {
+  pro:    30 * 86_400_000,
+  studio: 90 * 86_400_000,
+  free:   48 * 3_600_000,
 }
 
+// ---------------------------------------------------------------------------
+// OpenSearch percolate
+// ---------------------------------------------------------------------------
+
+interface PercolateHit {
+  _id:    string   // feed_id
+  _source: { feed_id: string; tier: string }
+}
+
+/**
+ * Percolate a single post document against all stored feed queries.
+ * Returns the list of matching { feedId, tier } pairs.
+ */
+async function percolate(
+  text: string,
+  did: string,
+): Promise<Array<{ feedId: string; tier: string }>> {
+  const creds = Buffer.from(`${OPENSEARCH_USER}:${OPENSEARCH_PASS}`).toString('base64')
+
+  const res = await fetch(`${OPENSEARCH_URL}/${PERCOLATOR_INDEX}/_search`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Basic ${creds}`,
+    },
+    body: JSON.stringify({
+      query: {
+        percolate: {
+          field:    'query',
+          document: { text, did },
+        },
+      },
+      _source: ['feed_id', 'tier'],
+      size:    1000,   // max feeds that can match a single post
+    }),
+  })
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`OpenSearch ${res.status}: ${body.slice(0, 200)}`)
+  }
+
+  const data = await res.json() as { hits: { hits: PercolateHit[] } }
+  return (data.hits?.hits ?? []).map(h => ({
+    feedId: h._source.feed_id,
+    tier:   h._source.tier ?? 'free',
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// Startup: verify OpenSearch connectivity and index exists
+// ---------------------------------------------------------------------------
+
+async function checkOpenSearch(): Promise<void> {
+  if (!OPENSEARCH_URL) {
+    throw new Error('OPENSEARCH_URL is not set')
+  }
+
+  const creds = Buffer.from(`${OPENSEARCH_USER}:${OPENSEARCH_PASS}`).toString('base64')
+  const res = await fetch(`${OPENSEARCH_URL}/${PERCOLATOR_INDEX}`, {
+    method: 'HEAD',
+    headers: { 'Authorization': `Basic ${creds}` },
+  })
+
+  if (res.status === 404) {
+    throw new Error(
+      `Percolator index "${PERCOLATOR_INDEX}" does not exist. ` +
+      `Run POST /internal/percolator/sync on the CF Worker first.`
+    )
+  }
+  if (!res.ok && res.status !== 405) {
+    throw new Error(`OpenSearch health check failed: ${res.status}`)
+  }
+
+  console.log(`[opensearch] percolator index "${PERCOLATOR_INDEX}" is ready`)
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 async function main(): Promise<void> {
-  console.log(`[main] starting filter engine`)
+  console.log('[main] starting filter engine (percolator mode)')
   console.log(`[main] TAP_URL=${TAP_URL}`)
+  console.log(`[main] OPENSEARCH_URL=${OPENSEARCH_URL}`)
 
-  // Initial config load
-  await loadConfigs()
-
-  // Poll for config changes every 60s
-  setInterval(loadConfigs, CONFIG_POLL_INTERVAL_MS)
+  await checkOpenSearch()
 
   const tap = new Tap(TAP_URL, { adminPassword: TAP_ADMIN_PASSWORD })
 
-  // channel() returns a TapChannel; call .start() to begin the event loop (blocks)
   const channel = tap.channel({
     async onEvent(event, ctx) {
       // Only process post creates
       if (
-        event.type !== 'record' ||
-        event.action !== 'create' ||
+        event.type       !== 'record' ||
+        event.action     !== 'create' ||
         event.collection !== 'app.bsky.feed.post'
       ) {
         await ctx.ack()
@@ -81,48 +140,41 @@ async function main(): Promise<void> {
         return
       }
 
-      // Log in skeleton mode when no configs loaded
-      if (activeConfigs.length === 0) {
-        console.log(`[event] post by ${event.did} text="${record.text.slice(0, 80)}"`)
+      let matches: Array<{ feedId: string; tier: string }>
+      try {
+        matches = await percolate(record.text, event.did)
+      } catch (e) {
+        // Log and ack — don't block the channel on a transient OS error.
+        // The post is lost for these feeds but Tap's at-least-once guarantee
+        // only covers the Tap → filter-engine leg, not the OS leg.
+        console.error('[percolate] error, skipping post:', e)
         await ctx.ack()
         return
       }
 
-      const matches: Array<{
-        feedId: string
-        postUri: string
-        postCid: string
-        authorDid: string
-        indexedAt: number
-        expiresAt: number
-      }> = []
-
-      for (const config of activeConfigs) {
-        if (matchPost(record.text, event.did, config)) {
-          const ttl = getTtlMs(config.tierAtCreation)
-          matches.push({
-            feedId: config.feedId,
-            postUri: `at://${event.did}/${event.collection}/${event.rkey}`,
-            postCid: event.cid ?? '',
-            authorDid: event.did,
-            indexedAt: Date.now(),
-            expiresAt: Date.now() + ttl,
-          })
-        }
-      }
-
       if (matches.length > 0) {
-        // Write to D1 before acking — ensures no posts lost on restart
-        await batchWrite(matches)
+        const now = Date.now()
+        const postUri = `at://${event.did}/${event.collection}/${event.rkey}`
+
+        const writes = matches.map(({ feedId, tier }) => ({
+          feedId,
+          postUri,
+          postCid:   event.cid ?? '',
+          authorDid: event.did,
+          indexedAt: now,
+          expiresAt: now + (TTL_MS[tier] ?? TTL_MS.free),
+        }))
+
+        // Write to D1 before acking — at-least-once guarantee
+        await batchWrite(writes)
         console.log(`[event] matched ${matches.length} feed(s) for post ${event.rkey}`)
       }
 
-      // Ack only after confirmed write (or if no matches)
       await ctx.ack()
     },
 
-    onError(err) {
-      console.error('[tap] channel error:', err)
+    onError(e) {
+      console.error('[tap] channel error:', e)
     },
   })
 
@@ -138,21 +190,11 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown)
   process.on('SIGINT', shutdown)
 
-  console.log(`[main] connected to Tap at ${TAP_URL}, listening for app.bsky.feed.post events`)
-
-  // start() runs the event loop — this blocks until shutdown
+  console.log(`[main] listening for app.bsky.feed.post events`)
   await channel.start()
 }
 
-function getTtlMs(tier: string): number {
-  switch (tier) {
-    case 'pro':    return 30 * 86_400_000
-    case 'studio': return 90 * 86_400_000
-    default:       return 48 * 3_600_000
-  }
-}
-
-main().catch((err) => {
-  console.error('[main] fatal:', err)
+main().catch(e => {
+  console.error('[main] fatal:', e)
   process.exit(1)
 })
