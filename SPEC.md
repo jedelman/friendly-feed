@@ -1,7 +1,7 @@
 # Friendly Feed — Product & Technical Specification
 
 **Status:** Pre-build  
-**Last updated:** 2026-03-21  
+**Last updated:** 2026-03-30  
 **Authors:** Jason Edelman, Claude (Anthropic)
 
 ---
@@ -12,35 +12,65 @@ A freemium SaaS that lets any Bluesky user build a personalized custom feed usin
 
 **Origin:** Faine Greenwood / Paris Marx thread on Bluesky (March 2026) identifying the gap between what custom feeds could do for ordinary users and what existing tools (SkyFeed, Bluesky Feed Creator) actually deliver.
 
-**Core insight:** Feed Creator owns community feed operators. The open territory is personal feed intelligence — individuals who want Bluesky to feel like it knows what they care about, without becoming a feed engineer.
+**Core insight:** Feed Creator owns community feed operators. Attie (Bluesky's own AI feed builder, launched March 2026) now owns the creation UX for casual users. The open territory is **feed intelligence that improves over time** — a HITL quality loop that learns from user feedback, compounds as a data asset, and makes feeds genuinely better. Neither Attie nor any existing tool builds this.
 
 ---
 
 ## Problem Statement
 
-Bluesky's custom feed system is powerful but inaccessible. Two existing tools:
+Bluesky's custom feed system is powerful but inaccessible. Existing tools:
 
 - **SkyFeed** (skyfeed.app): Regex-based, Flutter/Dart, solo dev, donations-only funding, reliability issues, effectively in maintenance mode as of 2024.
 - **Bluesky Feed Creator** (blueskyfeedcreator.com): Better UX, solid freemium model ($0/$2.99/$9.99), but still keyword-first, community-operator focused, no agentic capability, no feedback loop on feed quality.
+- **Attie** (attie.ai, launched March 2026): Bluesky's own standalone AI app. Natural language → custom feed, powered by Claude. Invite-only beta as of launch. **Direct overlap with Friendly Feed's creation UX.** Critical gap: no HITL loop, no feedback mechanism, no feed improvement over time. Creates feeds but does not learn whether they are good.
 
-Neither tool answers: *"I want posts about urban planning from a social justice angle — not think-tank stuff."* Users can't translate intent into keyword configs. The agent does that translation.
+The problem Attie does not solve: *"My feed was great last week but it's drifting — I keep seeing posts I don't care about."* Feed creation is now solved (by Attie). Feed quality over time is not.
+
+**The pivot:** Friendly Feed's positioning shifts from "plain language feed creation" (now commoditized by Attie) to **"the feed that gets better the more you use it."** Creation is the entry point; the HITL refinement loop is the product.
 
 ---
 
 ## Differentiation
 
-| Capability | SkyFeed | Feed Creator | Friendly Feed |
-|---|---|---|---|
-| No-code setup | Partial | Yes | Yes |
-| Plain language intent | No | No | **Yes** |
-| Agentic feed generation | No | No | **Yes** |
-| HITL quality loop | No | No | **Yes** |
-| Feed quality improves over time | No | No | **Yes** |
-| Agent skill / API | No | No | **Yes (Studio)** |
-| Reliability | Poor | Good | Target: excellent |
-| Business model | Donations | Freemium | **Freemium + metered** |
+Attie's launch (March 2026) changes the competitive map. Plain language feed creation is no longer a differentiator — Bluesky ships it natively. The table below reflects the updated landscape:
 
-The HITL (human-in-the-loop) thumbs-up/down data collected during feed creation and refinement is a compounding data asset — labeled training data mapping intent descriptions to feed quality signals. No competitor can replicate this without rebuilding their entire product interaction model.
+| Capability | SkyFeed | Feed Creator | Attie | Friendly Feed |
+|---|---|---|---|---|
+| No-code setup | Partial | Yes | Yes | Yes |
+| Plain language intent | No | No | **Yes** | **Yes** |
+| Agentic feed generation | No | No | **Yes** | **Yes** |
+| HITL quality loop | No | No | **No** | **Yes** |
+| Feed quality improves over time | No | No | **No** | **Yes** |
+| Feedback-driven refinement | No | No | **No** | **Yes** |
+| Weekly agent suggestions | No | No | No | **Yes (Pro+)** |
+| Agent skill / API | No | No | No | **Yes (Studio)** |
+| Reliability | Poor | Good | Unknown | Target: excellent |
+| Business model | Donations | Freemium | Free (Bluesky product) | **Freemium + metered** |
+
+**The HITL loop is now the entire moat.** Attie can create a feed from a prompt. It cannot tell you why your feed is getting worse, fix it, or learn from your behavior over time. That is Friendly Feed's job.
+
+The HITL (human-in-the-loop) thumbs-up/down data collected during feed creation and refinement is a compounding data asset — labeled training data mapping intent descriptions to feed quality signals. Attie has no feedback mechanism. Bluesky is unlikely to build one into the core product (it would require instrumenting user behavior at a granularity that conflicts with their stated values). This gap is durable.
+
+---
+
+## Competitive Context (updated 2026-03-30)
+
+**Attie** launched at the ATmosphere conference (March 28-29, 2026). It is a standalone product from Bluesky's new Exploration team, led by Jay Graber (CIO) and Paul Frazee (CTO). It runs on Claude (Anthropic). Users sign in with any AT Protocol account and describe feeds in natural language. Feeds become available in Bluesky or any atproto app.
+
+**What Attie has that Friendly Feed does not (yet):**
+- Native Bluesky distribution and credibility
+- Immediate access to the user's full follow graph and interaction history via open atproto data
+- Bluesky brand trust
+
+**What Attie explicitly lacks:**
+- Any feedback mechanism post-creation (no thumbs, no refinement)
+- Feed quality improvement over time
+- A business model (free, Bluesky-subsidized)
+- Ongoing HITL during live feed consumption
+
+**Attie's stated long-term roadmap:** vibe-coding social apps, not feed refinement. Their trajectory is toward a developer platform, not a feed quality product.
+
+**Strategic implication:** Don't race Attie on creation UX. Let Attie be the top of the funnel — users who outgrow Attie ("my feed is getting worse") are Friendly Feed's acquisition channel. Consider explicit messaging: *"Built your first feed with Attie? Friendly Feed makes it better over time."*
 
 ---
 
@@ -322,7 +352,7 @@ View caps enforced in the feed-skeleton Worker. At cap:
 
 ## Anti-Patterns / Known Risks
 
-**Bluesky ships a native feed builder:** The basic keyword layer could be commoditized within 12-18 months. The agentic HITL loop is the hedge — Bluesky won't build a training data pipeline into their core product. Invest early in the data asset.
+**Bluesky shipped a native feed builder (Attie, March 2026):** The plain language creation UX is now commoditized. This happened faster than the 12-18 month projection. The HITL loop is no longer a hedge — it is the product. Attie has no feedback mechanism. Bluesky is unlikely to add one; it would require instrumenting individual user behavior at a granularity that conflicts with their stated values around user agency. Build the HITL loop before anything else that is not strictly required to make it work.
 
 **Railway cost spike on viral feeds:** The filter engine cost is largely fixed; the CF serving cost scales at ~$0.30/M views. Monitor view velocity and auto-notify at 80% of tier cap.
 
@@ -371,6 +401,8 @@ friendly-feed/
 
 ## Build Order
 
+> **Note (updated 2026-03-30):** Attie's launch reprioritizes this list. HITL (steps 10-11 below) is now the primary differentiator and must ship before the product is meaningfully distinct from Attie. The infrastructure and agent steps are prerequisites, not the product.
+
 1. **Schema + types** (`packages/shared/`) — define the data model, write DDL
 2. **Tap container** (`services/tap/`) — get it running on Railway, verify firehose connection
 3. **Filter engine skeleton** (`services/filter-engine/`) — connect to Tap, log events, no matching yet
@@ -380,11 +412,12 @@ friendly-feed/
 7. **Register test feed** — manually register a feed generator DID, verify it appears in Bluesky
 8. **Builder UI — connect + create flow** — Bluesky account connection, natural language input
 9. **Agent integration** — Anthropic API call for feed config generation
-10. **HITL preview** — post previews + thumbs up/down → config refinement
-11. **Publish flow** — end-to-end: describe → preview → refine → publish → visible in Bluesky
-12. **Auth + billing** — Stripe integration, tier enforcement in Worker + filter engine
-13. **Weekly refinement cron** — CF Worker cron trigger, agent suggestions
-14. **Agent skill** (Studio tier) — publish MCP tool `generate_bluesky_feed()`
+10. **⭐ HITL preview** — post previews + thumbs up/down → config refinement ← **now the core product**
+11. **⭐ Publish flow** — end-to-end: describe → preview → refine → publish → visible in Bluesky ← **do not ship without this**
+12. **⭐ Ongoing HITL** — thumbs up/down within the live feed (not just at creation), feeds hitl_events continuously ← **new step, replaces weekly cron as primary data source**
+13. **Auth + billing** — Stripe integration, tier enforcement in Worker + filter engine
+14. **Weekly refinement cron** — CF Worker cron trigger, agent suggestions based on accumulated hitl_events
+15. **Agent skill** (Studio tier) — publish MCP tool `generate_bluesky_feed()`
 
 ---
 
@@ -395,6 +428,9 @@ friendly-feed/
 - [ ] Filter engine scaling strategy — at what user count do we need to shard the filter engine across multiple Railway services?
 - [ ] HITL data licensing — make the aggregate dataset available to researchers? Relevant to the commons framing.
 - [ ] Name / brand — "Friendly Feed" is a working title
+- [ ] **Attie interop** — should Friendly Feed accept Attie-generated feed configs as import/starting point? Could reduce friction for Attie users who want the HITL layer.
+- [ ] **Positioning vs. Attie** — compete directly (we do creation better + refinement) or complement (Attie creates, Friendly Feed refines)? The complement angle has lower CAC; the compete angle has higher ceiling.
+- [ ] **Ongoing HITL UX** — where does thumbs up/down live during live feed consumption? In-app companion? Browser extension? Bluesky doesn't expose feed interaction hooks natively.
 
 ---
 
