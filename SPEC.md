@@ -1,7 +1,7 @@
 # Friendly Feed — Product & Technical Specification
 
 **Status:** Pre-build  
-**Last updated:** 2026-03-30  
+**Last updated:** 2026-04-04  
 **Authors:** Jason Edelman, Claude (Anthropic)
 
 ---
@@ -77,17 +77,24 @@ The HITL (human-in-the-loop) thumbs-up/down data collected during feed creation 
 ## Architecture
 
 ```
-[AT Protocol Relay — bsky.network]
-         ↓ firehose (Sync v1.1, authenticated)
-[Railway: Tap container]
-  ghcr.io/bluesky-social/indigo/tap:latest
-  port 2480, TAP_ADMIN_PASSWORD set
-         ↓ WebSocket + acks (@atproto/tap)
-[Railway: Filter Engine — TypeScript/Node]
-  - Reads feed configs from D1 on startup + poll
-  - Matches incoming RecordEvents against per-feed rules
-  - Batches matched post URIs → writes to D1
-         ↓ D1 binding (via CF Worker or REST)
+[Bluesky Jetstream — jetstream2.us-east.bsky.network]
+  wantedCollections=app.bsky.feed.post
+  JSON over WebSocket, no CBOR/CAR decoding required
+         ↓ WebSocket (persistent connection)
+[AWS Fargate: firehose-consumer]
+  - TypeScript/Node container
+  - Built with Nix (pkgs.dockerTools.buildImage → ECR)
+  - Persistent WebSocket connection to Jetstream
+  - On each post event: fires percolation query against AOSS
+  - Writes matched (feed_id, post_uri) pairs to D1
+  - Cursor persisted to DynamoDB (single item, updated each batch)
+         ↓ HTTP + AWS SigV4
+[AWS OpenSearch Serverless — percolation index]
+  - Feed configs indexed as percolation queries at creation time
+  - Incoming posts matched against all configs in a single query
+  - Returns list of matching feed_ids per post
+  - Pay per OCU-hour (scale-to-near-zero when idle)
+         ↓ matched feed_id + post_uri pairs
 [Cloudflare D1 — storage layer]
   - Table: feed_configs (feed rules per user)
   - Table: feed_posts (matched post URIs per feed, TTL'd)
@@ -120,9 +127,15 @@ The HITL (human-in-the-loop) thumbs-up/down data collected during feed creation 
 
 ### Key architectural decisions
 
-**Tap over Jetstream:** Tap provides authenticated sync, cryptographic verification, automatic backfill, and at-least-once delivery. For a production feed service where reliability is the moat, Tap is correct. Jetstream is simpler but unauthenticated and not formally part of the protocol.
+**Jetstream over Tap (pre-alpha):** Jetstream provides simple JSON events over WebSocket, filterable by collection at connection time. No CBOR decoding, no CAR file handling, no Tap sidecar. Significantly reduces pre-alpha complexity. Tradeoff: events are not cryptographically authenticated and Jetstream is not formally part of the AT Protocol spec. Acceptable for a feed matching use case where a spoofed post means noise, not a security failure. Upgrade path to Tap is a consumer swap, not a rewrite. See `docs/decisions/jetstream-vs-tap.md`.
 
-**Railway for Tap + Filter Engine:** Tap requires a persistent process consuming the firehose 24/7. Railway provides Docker container hosting with usage-based pricing. The Tap+Filter Engine is largely fixed cost (~$110-130/mo) regardless of user count up to ~5K users.
+**Percolation over filter engine (Railway → AWS AOSS):** The original filter engine ran every active feed config against every incoming post — O(posts × configs). OpenSearch percolation inverts this: feed configs are indexed as queries, incoming posts are matched against all configs in a single query — O(posts × index_lookup). Scales to thousands of feed configs without linear cost growth. AWS OpenSearch Serverless removes always-on cluster cost; pay per OCU-hour.
+
+**Nix for container builds:** No Dockerfile. Container images built via `pkgs.dockerTools.buildImage` in Nix. Fully reproducible builds, minimal image size (no package manager cruft), lockfile-enforced dependency versions. Images pushed to AWS ECR. Requires Nix installed locally; `flake.nix` at repo root defines the build.
+
+**Fargate for consumer runtime:** Jetstream requires a persistent WebSocket connection — Lambda's 15-minute execution limit makes it unsuitable. Fargate runs the consumer as a long-lived ECS task. Restarts automatically on crash. Minimal resource requirements (0.25 vCPU / 512MB sufficient for pre-alpha).
+
+**DynamoDB for cursor state:** Single-item table storing the Jetstream cursor (a Unix microsecond timestamp). On consumer restart, reads cursor and reconnects to Jetstream at that position — no event replay from the beginning. Sub-millisecond read, effectively free at this scale.
 
 **Cloudflare D1 + Workers for serving:** Serverless, global edge, no egress charges, scale-to-zero billing. Feed skeleton serving is read-heavy and latency-sensitive — D1 with read replication is well-suited.
 
@@ -199,40 +212,36 @@ view_events (
 
 ## Services
 
-### `services/tap/`
+### `services/firehose-consumer/`
 
-Docker Compose wrapper around the official Tap image. Configuration via environment variables.
-
-```yaml
-# docker-compose.yml (see file for full config)
-image: ghcr.io/bluesky-social/indigo/tap:latest
-environment:
-  TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
-  TAP_RELAY_HOST: wss://bsky.network
-  TAP_LOG_LEVEL: info
-ports:
-  - "2480:2480"
-```
-
-Tap does not need to track specific repos for this use case — we consume the full `app.bsky.feed.post` collection stream and filter in the engine. Do NOT set `TAP_FULL_NETWORK=true` (terabytes of data). Filter by collection only.
-
-### `services/filter-engine/`
-
-TypeScript/Node process. Connects to Tap via `@atproto/tap` WebSocket client.
+TypeScript/Node process. Runs on AWS Fargate. Built as a container image via Nix (`pkgs.dockerTools.buildImage`), pushed to AWS ECR.
 
 Responsibilities:
-- On startup: load all active feed configs from D1
-- Poll D1 for config changes every 60s (new feeds, updated rules)
-- For each incoming `RecordEvent` where `collection === 'app.bsky.feed.post'`:
-  - Run the post text against all active feed configs
-  - Batch matched URIs → bulk INSERT to D1 `feed_posts`
-  - Apply TTL based on feed owner's tier
-- Ack each event after D1 write confirmed
+- Connect to Jetstream WebSocket (`wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post`)
+- On reconnect: read cursor from DynamoDB, pass as `?cursor=<unix_microseconds>` to resume without replay
+- For each incoming post event:
+  - Fire percolation query against AOSS
+  - Collect matching feed_ids
+  - Batch write `(feed_id, post_uri, author_did, indexed_at, expires_at)` to D1 `feed_posts`
+- Persist cursor to DynamoDB after each successful batch write
+- Exponential backoff on WebSocket disconnect (1s → 60s max)
 
 Key files:
-- `src/index.ts` — Tap connection, event loop, config polling
-- `src/matcher.ts` — term matching logic (include/exclude/seed account boost)
+- `src/index.ts` — WebSocket connection, event loop, reconnect logic
+- `src/percolate.ts` — AOSS percolation query (AWS SDK v3 + SigV4)
 - `src/writer.ts` — D1 batch write with retry
+- `src/cursor.ts` — DynamoDB cursor read/write
+- `flake.nix` (repo root) — Nix flake defining container image build + dev shell
+
+### AWS infrastructure
+
+**OpenSearch Serverless collection:** Single collection, percolation index (`feed_configs_percolation`). Feed configs written to index at creation time as percolation queries. Schema: `{ query: { bool: { must: [...terms], must_not: [...excludeTerms] } } }` with `feed_id` as metadata.
+
+**DynamoDB table:** `friendly-feed-cursor`. Single item: `{ pk: "cursor", value: "<unix_microseconds>" }`. PAY_PER_REQUEST billing — essentially free.
+
+**ECR repository:** `friendly-feed/firehose-consumer`. Tagged by git SHA. Fargate task definition references ECR image URI.
+
+**IAM role:** Fargate task role with permissions scoped to: AOSS collection read/write, DynamoDB table read/write, CloudWatch Logs write.
 
 ### `workers/feed-skeleton/`
 
@@ -313,10 +322,12 @@ Cron job (CF Worker cron trigger) runs weekly per active Pro/Studio feed:
 
 ### Cost model
 
-Fixed infra: ~$130/mo (Railway Tap + filter engine + CF Workers base)  
-Marginal cost per user/month: ~$0.14 at 1K users, ~$0.055 at 5K  
-Marginal cost per million views served: ~$0.30 (CF Workers overages)  
-Break-even: **25 Pro subscribers**
+Fixed infra: ~$30-50/mo (Fargate task ~$10-15 + AOSS serverless ~$10-20 idle + DynamoDB ~$0 + CF Workers base ~$5)
+Marginal cost per user/month: well under $0.10 at 1K users (AOSS scales with query volume, not user count)
+Marginal cost per million views served: ~$0.30 (CF Workers overages)
+Break-even: **~10-15 Pro subscribers** (down from 25 with Railway)
+
+> Previous estimate of ~$130/mo fixed (Railway) replaced by ~$30-50/mo (AWS serverless). AOSS OCU cost is the main variable — monitor closely in first month.
 
 ### Overage model
 
@@ -352,13 +363,15 @@ View caps enforced in the feed-skeleton Worker. At cap:
 
 ## Anti-Patterns / Known Risks
 
-**Bluesky shipped a native feed builder (Attie, March 2026):** The plain language creation UX is now commoditized. This happened faster than the 12-18 month projection. The HITL loop is no longer a hedge — it is the product. Attie has no feedback mechanism. Bluesky is unlikely to add one; it would require instrumenting individual user behavior at a granularity that conflicts with their stated values around user agency. Build the HITL loop before anything else that is not strictly required to make it work.
+**Bluesky shipped a native feed builder (Attie, March 2026):** The plain language creation UX is now commoditized. The HITL loop is no longer a hedge — it is the product. Build it first.
 
-**Railway cost spike on viral feeds:** The filter engine cost is largely fixed; the CF serving cost scales at ~$0.30/M views. Monitor view velocity and auto-notify at 80% of tier cap.
+**Jetstream stability risk:** Jetstream is not formally part of the AT Protocol spec. If Bluesky deprecates the public instances, self-host the open-source Jetstream server (Go, easy to containerize). Upgrade path to full authenticated relay (Tap) is a consumer swap. Document this in `docs/decisions/jetstream-vs-tap.md`.
 
-**AT Protocol instability:** The protocol is still maturing (Sync v1.1 rollout ongoing, OAuth in progress). Tap abstracts most of this. Stay on the official Tap image, don't fork it.
+**AOSS cold start / OCU minimum:** OpenSearch Serverless has a minimum of 2 OCUs per collection (~$350/mo at full utilization). In practice, serverless collections scale toward zero when idle, but verify actual idle cost in first billing cycle before committing to this for production.
 
-**Single-tenant Tap:** Tap is described as single-tenant by design. If the filter engine goes down, Tap buffers up to 1M events in memory. The filter engine must ack events only after D1 write — this ensures no posts are lost across restarts.
+**AT Protocol instability:** OAuth still maturing, Sync v1.1 rollout ongoing. Jetstream abstracts most of this. Stay on official public instances until self-hosting is needed.
+
+**Nix build learning curve:** If `pkgs.dockerTools.buildImage` causes friction at pre-alpha speed, fall back to a minimal Alpine Dockerfile for the first deploy and introduce Nix builds in the second sprint. Don't let tooling block shipping.
 
 ---
 
@@ -366,8 +379,10 @@ View caps enforced in the feed-skeleton Worker. At cap:
 
 ```
 friendly-feed/
+├── flake.nix                        # Nix flake: dev shell + container image build
+├── flake.lock                       # Locked Nix dependencies
 ├── SPEC.md                          # This file
-├── README.md                        # Setup and deployment guide (TODO)
+├── README.md                        # Setup and deployment guide
 ├── apps/
 │   └── builder/                     # Feed builder UI
 │       ├── src/
@@ -376,13 +391,16 @@ friendly-feed/
 │       │   └── style.css
 │       └── public/
 ├── services/
-│   ├── tap/                         # Tap Docker config
-│   │   └── docker-compose.yml
-│   └── filter-engine/               # Firehose consumer + D1 writer
+│   └── firehose-consumer/           # Jetstream consumer → AOSS percolation → D1
 │       └── src/
-│           ├── index.ts             # Entry point, Tap connection
-│           ├── matcher.ts           # Feed config matching logic
-│           └── writer.ts            # D1 batch writes
+│           ├── index.ts             # Entry point, WebSocket loop, reconnect
+│           ├── percolate.ts         # AOSS percolation query (AWS SDK v3)
+│           ├── writer.ts            # D1 batch writes
+│           └── cursor.ts            # DynamoDB cursor persistence
+├── infra/
+│   ├── ecs-task.json                # Fargate task definition
+│   ├── dynamodb.tf                  # Cursor table (Terraform or CDK, TBD)
+│   └── opensearch.tf                # AOSS collection + percolation index
 ├── workers/
 │   └── feed-skeleton/               # CF Worker: getFeedSkeleton
 │       ├── src/
@@ -393,7 +411,9 @@ friendly-feed/
 │       └── src/
 │           ├── types.ts             # FeedConfig, FeedPost, User, HitlEvent
 │           └── schema.sql           # D1 DDL
-├── docs/                            # Architecture diagrams, decisions
+├── docs/
+│   └── decisions/
+│       └── jetstream-vs-tap.md      # ADR: why Jetstream for pre-alpha
 └── scripts/                         # DB migration, feed registration helpers
 ```
 
@@ -401,36 +421,42 @@ friendly-feed/
 
 ## Build Order
 
-> **Note (updated 2026-03-30):** Attie's launch reprioritizes this list. HITL (steps 10-11 below) is now the primary differentiator and must ship before the product is meaningfully distinct from Attie. The infrastructure and agent steps are prerequisites, not the product.
+> **Note (updated 2026-04-04):** Architecture revised — Railway + Tap + filter engine replaced by Jetstream + AWS Fargate + AOSS percolation + DynamoDB cursor. Nix used for container builds (no Dockerfile). HITL loop remains the primary differentiator; infra steps below reflect the new stack.
 
-1. **Schema + types** (`packages/shared/`) — define the data model, write DDL
-2. **Tap container** (`services/tap/`) — get it running on Railway, verify firehose connection
-3. **Filter engine skeleton** (`services/filter-engine/`) — connect to Tap, log events, no matching yet
-4. **D1 setup** — create database via wrangler, run migrations
-5. **Filter engine matching** — implement matcher.ts against hardcoded test config
-6. **Feed skeleton Worker** (`workers/feed-skeleton/`) — implement lexicon endpoint, connect to D1
-7. **Register test feed** — manually register a feed generator DID, verify it appears in Bluesky
-8. **Builder UI — connect + create flow** — Bluesky account connection, natural language input
-9. **Agent integration** — Anthropic API call for feed config generation
-10. **⭐ HITL preview** — post previews + thumbs up/down → config refinement ← **now the core product**
-11. **⭐ Publish flow** — end-to-end: describe → preview → refine → publish → visible in Bluesky ← **do not ship without this**
-12. **⭐ Ongoing HITL** — thumbs up/down within the live feed (not just at creation), feeds hitl_events continuously ← **new step, replaces weekly cron as primary data source**
-13. **Auth + billing** — Stripe integration, tier enforcement in Worker + filter engine
-14. **Weekly refinement cron** — CF Worker cron trigger, agent suggestions based on accumulated hitl_events
-15. **Agent skill** (Studio tier) — publish MCP tool `generate_bluesky_feed()`
+1. **Nix dev shell + flake** (`flake.nix`) — set up reproducible dev environment, Node + AWS CLI + wrangler available via `nix develop`
+2. **Schema + types** (`packages/shared/`) — D1 DDL, TypeScript types
+3. **D1 setup** — `wrangler d1 create friendly-feed`, run migrations
+4. **AOSS collection + percolation index** — create collection, define index mapping, test a manual percolation query
+5. **DynamoDB cursor table** — single-item table, verify read/write
+6. **Firehose consumer skeleton** (`services/firehose-consumer/`) — connect to Jetstream, log raw events, no matching yet
+7. **Percolation wired** — on each post event, fire AOSS query, log matching feed_ids
+8. **D1 writes** — batch write matched pairs to `feed_posts`, cursor to DynamoDB
+9. **Nix container build** — `pkgs.dockerTools.buildImage`, push to ECR, deploy to Fargate, verify end-to-end
+10. **Feed skeleton Worker** (`workers/feed-skeleton/`) — implement lexicon endpoint, connect to D1
+11. **Register test feed** — manually write a percolation query to AOSS, verify posts land in D1, verify Bluesky can read the feed
+12. **Builder UI — connect + create flow** — Bluesky account connection, natural language input
+13. **Agent integration** — Anthropic API call for feed config generation, writes percolation query to AOSS on publish
+14. **⭐ HITL preview** — post previews + thumbs up/down → config refinement ← **core product**
+15. **⭐ Publish flow** — end-to-end: describe → preview → refine → publish → visible in Bluesky
+16. **⭐ Ongoing HITL** — thumbs during live feed consumption, continuous `hitl_events` writes
+17. **Auth + billing** — Stripe, tier enforcement
+18. **Weekly refinement cron** — CF Worker cron, agent suggestions from accumulated HITL data
+19. **Agent skill** (Studio tier) — MCP tool `generate_bluesky_feed()`
 
 ---
 
 ## Open Questions
 
 - [ ] AT Proto OAuth timeline — when can we register feeds under user's own DID without app passwords?
-- [ ] Feed preview source — use Bluesky search API for preview posts at creation time, or buffer recent firehose posts in D1 for faster preview?
-- [ ] Filter engine scaling strategy — at what user count do we need to shard the filter engine across multiple Railway services?
+- [ ] Feed preview source — use Bluesky search API for preview posts at creation time, or buffer recent Jetstream posts in D1?
+- [ ] AOSS actual idle cost — verify OCU billing in first month; may need to evaluate single shared collection vs. per-environment collections
+- [ ] Infra-as-code choice — Terraform vs. CDK for AOSS + DynamoDB + ECS task definition
 - [ ] HITL data licensing — make the aggregate dataset available to researchers? Relevant to the commons framing.
 - [ ] Name / brand — "Friendly Feed" is a working title
-- [ ] **Attie interop** — should Friendly Feed accept Attie-generated feed configs as import/starting point? Could reduce friction for Attie users who want the HITL layer.
-- [ ] **Positioning vs. Attie** — compete directly (we do creation better + refinement) or complement (Attie creates, Friendly Feed refines)? The complement angle has lower CAC; the compete angle has higher ceiling.
-- [ ] **Ongoing HITL UX** — where does thumbs up/down live during live feed consumption? In-app companion? Browser extension? Bluesky doesn't expose feed interaction hooks natively.
+- [ ] **Attie interop** — should Friendly Feed accept Attie-generated feed configs as import/starting point?
+- [ ] **Positioning vs. Attie** — compete directly or complement (Attie creates, Friendly Feed refines)?
+- [ ] **Ongoing HITL UX** — where does thumbs up/down live during live feed consumption? In-app companion? Browser extension?
+- [ ] **Jetstream → Tap upgrade trigger** — define the specific condition (user count? reliability incident?) that triggers migration to authenticated relay
 
 ---
 
