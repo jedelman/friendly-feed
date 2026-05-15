@@ -445,6 +445,22 @@ friendly-feed/
 
 ---
 
+## Architectural Note: PDS-Native Feed Storage
+
+> *Added 2026-05-15*
+
+**Proposal:** Use OpenSearch percolation for matching only — do not store matched results in D1. Instead, push matched  pairs into a message queue (SQS or similar), then write the feed directly to the user's own PDS repo. The feed skeleton Worker reads from the user's PDS rather than from a Friendly Feed-owned D1 table.
+
+**Implications:**
+- **Storage cost eliminated** — no D1  table; no ranking or preference data hosted by Friendly Feed
+- **User hosts their own feed** — AT Proto's PDS repo becomes the durable feed store; user's PDS operator picks up the tab
+- **Privacy by design** — Friendly Feed holds no per-user post history; HITL signal accumulation would need to live in the user's PDS or be stateless
+- **Feed skeleton serving** — Worker would proxy reads from user's PDS instead of D1; latency profile TBD
+- **Open question:** Does writing matched posts to a user's PDS require AT Proto OAuth (lexicon write permissions)? If so, this depends on the OAuth timeline open question below.
+- **Open question:** Does this constrain HITL signal storage? Ranking/preference data would need to either live in the user's PDS (user controls it) or be held ephemerally by Friendly Feed (loses persistence). Needs design decision before HITL build.
+
+This is a significant architectural divergence from the current D1-centric design. Revisit before starting Step 8 (D1 writes).
+
 ## Open Questions
 
 - [ ] AT Proto OAuth timeline — when can we register feeds under user's own DID without app passwords?
