@@ -457,7 +457,7 @@ friendly-feed/
 - **Privacy by design** — Friendly Feed holds no per-user post history; HITL signal accumulation would need to live in the user's PDS or be stateless
 - **Feed skeleton serving** — Worker would proxy reads from user's PDS instead of D1; latency profile TBD
 - **Open question:** Does writing matched posts to a user's PDS require AT Proto OAuth (lexicon write permissions)? If so, this depends on the OAuth timeline open question below.
-- **Open question:** Does this constrain HITL signal storage? Ranking/preference data would need to either live in the user's PDS (user controls it) or be held ephemerally by Friendly Feed (loses persistence). Needs design decision before HITL build.
+- **HITL signal storage resolved:** Ranking/preference data lives in the user's PDS. On feed regenerate, the client posts HITL data transiently to Friendly Feed servers, which use it to re-score/re-query OpenSearch, then discard it. Signal is never persisted server-side. This achieves near-ZDR (zero data retention) — the only data Friendly Feed holds is the feed config / percolation query itself.
 
 This is a significant architectural divergence from the current D1-centric design. Revisit before starting Step 8 (D1 writes).
 
